@@ -2,150 +2,206 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
-    <title>Releazio Demo — Full show_interval Control</title>
+    <title>Releazio Badge Demo — robust show_interval parsing</title>
 
-    <!-- ===== INTERCEPTOR (должен быть ПЕРВЫМ) ===== -->
     <script>
       (function () {
         const originalFetch = window.fetch.bind(window);
 
         window.fetch = async (...args) => {
-          const response = await originalFetch(...args);
+          try {
+            const response = await originalFetch(...args);
 
-          const url = (args[0] || "").toString().toLowerCase();
-          if (url.includes("releazio") || url.includes("/check") || url.includes("/appstore") || url.includes("/googleplay")) {
-            try {
-              const clone = response.clone();
-              const json = await clone.json();
-              window.__releazioConfig = json;
-              console.log("🎯 Intercepted Releazio config:", json);
-            } catch (err) {
-              console.warn("⚠️ Failed to parse intercepted response:", err);
+            const url = (args[0] || "").toString().toLowerCase();
+            if (url.includes("releazio") || url.includes("/check") || url.includes("/appstore") || url.includes("/googleplay")) {
+              try {
+                const clone = response.clone();
+                const json = await clone.json();
+                window.__releazioConfig = json;
+                console.log("🎯 Interceptor: Releazio response saved:", json);
+              } catch (err) {
+                console.warn("⚠️ Interceptor: can't parse response body as JSON:", err);
+              }
             }
-          }
 
-          return response;
+            return response;
+          } catch (err) {
+            throw err;
+          }
         };
       })();
     </script>
 
-    <!-- SDK -->
     <script src="https://cdn.jsdelivr.net/npm/@rlzio/sdk"></script>
   </head>
-
   <body>
-    <h1>Releazio Demo (popup + badge under show_interval)</h1>
+    <h1>Releazio demo (robust)</h1>
     <div id="badge-container"></div>
 
     <script>
-      /* ====================== HELPERS ====================== */
+      // ----- Поиск ключа show_interval рекурсивно -----
+      function findKeyRecursive(obj, keyName) {
+        if (obj == null) return undefined;
+        if (typeof obj !== 'object') return undefined;
 
-      function waitForReleazioConfig(timeout = 6000) {
+        const lowerKey = keyName.toLowerCase();
+
+        const stack = [obj];
+        while (stack.length) {
+          const cur = stack.pop();
+
+          if (cur && typeof cur === 'object') {
+            for (const k of Object.keys(cur)) {
+              try {
+                if (k.toLowerCase() === lowerKey) {
+                  return cur[k];
+                }
+              } catch (e) {
+                // ignore weird keys
+              }
+              const v = cur[k];
+              if (v && typeof v === 'object') stack.push(v);
+            }
+          }
+        }
+        return undefined;
+      }
+
+      // ----- Умеренно "жёсткий" парсер значения -----
+      function parseShowInterval(raw) {
+        console.log("parseShowInterval: raw value ->", raw, "type:", typeof raw);
+
+        if (raw == null) return NaN;
+
+        // если это число — возвращаем
+        if (typeof raw === 'number' && Number.isFinite(raw)) {
+          return Math.trunc(raw);
+        }
+
+        // если это boolean — невалид
+        if (typeof raw === 'boolean') return NaN;
+
+        // если это объект (вложенный), пробуем найти внутри него
+        if (typeof raw === 'object') {
+          // попробуем найти поле show_interval внутри него
+          const nested = findKeyRecursive(raw, 'show_interval');
+          if (nested !== undefined && nested !== raw) {
+            return parseShowInterval(nested);
+          }
+          return NaN;
+        }
+
+        let s = String(raw).trim();
+
+        s = s.replace(/\u00A0/g, ' ').replace(/[\r\n\t]+/g, '').trim();
+
+        
+        if ((s.startsWith('{') && s.endsWith('}')) || (s.startsWith('[') && s.endsWith(']'))) {
+          try {
+            const parsed = JSON.parse(s);
+            return parseShowInterval(parsed);
+          } catch (e) {
+            
+            console.warn("parseShowInterval: string looks like JSON but parse failed:", e);
+          }
+        }
+
+       
+        const intMatch = s.match(/-?\d+/);
+        if (intMatch) {
+          const v = parseInt(intMatch[0], 10);
+          if (!isNaN(v)) return v;
+        }
+
+       
+        const f = parseFloat(s.replace(',', '.'));
+        if (!isNaN(f)) return Math.trunc(f);
+
+        return NaN;
+      }
+
+      function canShowPopup(showIntervalMinutes) {
+        if (!showIntervalMinutes && showIntervalMinutes !== 0) return true;
+        const lastShown = localStorage.getItem('popup_last_shown');
+        if (!lastShown) return true;
+        const last = new Date(parseInt(lastShown, 10));
+        const now = new Date();
+        const diffMinutes = (now - last) / 1000 / 60;
+        return diffMinutes >= showIntervalMinutes;
+      }
+
+      function markPopupShown() {
+        localStorage.setItem('popup_last_shown', Date.now().toString());
+      }
+
+      function waitForReleazioConfig(timeoutMs = 6000, pollInterval = 100) {
         return new Promise((resolve) => {
           const start = Date.now();
-          (function check() {
-            if (window.__releazioConfig) return resolve(window.__releazioConfig);
-            if (Date.now() - start >= timeout) return resolve(null);
-            setTimeout(check, 100);
+          (function poll() {
+            if (window.__releazioConfig) {
+              resolve(window.__releazioConfig);
+              return;
+            }
+            if (Date.now() - start >= timeoutMs) {
+              resolve(null);
+              return;
+            }
+            setTimeout(poll, pollInterval);
           })();
         });
       }
 
-      function findKeyRecursive(obj, keyName) {
-        if (!obj || typeof obj !== "object") return undefined;
-        const target = keyName.toLowerCase();
-        const stack = [obj];
-
-        while (stack.length) {
-          const cur = stack.pop();
-          for (const key in cur) {
-            try {
-              if (key.toLowerCase() === target) return cur[key];
-              if (typeof cur[key] === "object") stack.push(cur[key]);
-            } catch {}
-          }
-        }
-
-        return undefined;
-      }
-
-      function parseShowInterval(raw) {
-        if (raw == null) return NaN;
-        if (typeof raw === "number") return raw;
-
-        let s = String(raw)
-          .trim()
-          .replace(/\u00A0/g, " ")
-          .replace(/[\r\n\t]/g, "")
-          .trim();
-
-        const match = s.match(/-?\d+/);
-        return match ? parseInt(match[0], 10) : NaN;
-      }
-
-      function canShowPopup(intervalMinutes) {
-        const last = localStorage.getItem("popup_last_shown");
-        if (!last) return true;
-
-        const lastDate = new Date(parseInt(last, 10));
-        const now = new Date();
-
-        const diffMinutes = (now - lastDate) / 1000 / 60;
-        return diffMinutes >= intervalMinutes;
-      }
-
-      function markPopupShown() {
-        localStorage.setItem("popup_last_shown", Date.now().toString());
-      }
-
-      /* ====================== MAIN ====================== */
-
       (async () => {
-        await ReleazioSDK.init({
-          apiKey: "rGpOXpIUWW+60H20cuXH8a1t38zJ51T6exv1heV8yMU=",
-          appVersionName: "1.0.0",
-          appVersionCode: "1",
-          channel: "appstore",
-          language: "en",
-          endpoint: "https://check.dev.releazio.com",
-          enableModals: false  // <--- ВАЖНО!
-        });
+        try {
+          await ReleazioSDK.init({
+            apiKey: 'rGpOXpIUWW+60H20cuXH8a1t38zJ51T6exv1heV8yMU=',
+            appVersionName: '1.0.0',
+            appVersionCode: '1',
+            channel: 'appstore',
+            language: 'en',
+            endpoint: 'https://check.dev.releazio.com',
+            enableModals: true
+          });
 
-        const config = await waitForReleazioConfig();
+          const config = await waitForReleazioConfig(6000);
 
-        if (!config) {
-          console.warn("⚠️ Config not intercepted. Using fallback.");
-          await ReleazioSDK.renderBadge("#badge-container");
-          await ReleazioSDK.showUpdateModal();
-          markPopupShown();
-          return;
-        }
+          if (!config) {
+            console.warn("⚠️ Interceptor: config not found. Falling back to direct render.");
+            await ReleazioSDK.renderBadge('#badge-container');
+            markPopupShown();
+            return;
+          }
 
-        console.log("CONFIG:", config);
+          console.log("Interceptor CONFIG:", config);
 
-        const raw = findKeyRecursive(config, "show_interval");
-        console.log("raw show_interval =", raw);
+          const raw = findKeyRecursive(config, 'show_interval');
+          console.log("Interceptor: found raw show_interval via recursive search ->", raw);
 
-        const showInterval = parseShowInterval(raw);
-        console.log("parsed show_interval =", showInterval);
+          const showInterval = parseShowInterval(raw);
+          console.log("Final parsed showInterval =", showInterval, "isNaN:", isNaN(showInterval));
 
-        if (isNaN(showInterval)) {
-          console.warn("⚠️ Invalid show_interval → fallback show");
-          await ReleazioSDK.renderBadge("#badge-container");
-          await ReleazioSDK.showUpdateModal();
-          markPopupShown();
-          return;
-        }
+          if (isNaN(showInterval)) {
+            console.warn("⚠️ show_interval не удалось распарсить. Показываю popup (fallback).");
+            await ReleazioSDK.renderBadge('#badge-container');
+            markPopupShown();
+            return;
+          }
 
-        if (canShowPopup(showInterval)) {
-          console.log("✅ Interval passed → showing popup and badge");
-
-          await ReleazioSDK.renderBadge("#badge-container");
-          await ReleazioSDK.showUpdateModal();
-
-          markPopupShown();
-        } else {
-          console.log("⏳ Popup suppressed → interval not passed");
+          if (canShowPopup(showInterval)) {
+            await ReleazioSDK.renderBadge('#badge-container');
+            markPopupShown();
+            console.log("✅ Popup shown. show_interval:", showInterval);
+          } else {
+            console.log("⏳ Popup suppressed. show_interval:", showInterval);
+          }
+        } catch (err) {
+          console.error("Unexpected error:", err);
+          try {
+            await ReleazioSDK.renderBadge('#badge-container');
+            markPopupShown();
+          } catch (e) {
+            console.warn("Failed to render badge:", e);
+          }
         }
       })();
     </script>
